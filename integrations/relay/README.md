@@ -40,3 +40,28 @@ python3 integrations/relay/test_review.py
 Point PATH at the candidate Leaf binary when running the check. It exercises a
 real terminal, submits a plan verdict, closes a diff review, and rereads the
 outcomes. Review the candidate before promoting it to relay.
+
+## MCP for Claude Code and Codex
+
+Start a stdio server on the machine that holds the files:
+
+```sh
+uv run --script integrations/relay/leaf_mcp.py --root /absolute/workspace
+```
+
+Leaf must be on PATH or supplied with `--leaf /absolute/path/to/leaf`. Configure
+the client to launch this command with an absolute script path. Each connection
+owns up to four private 110 × 35 readers. Paths resolve against the configured
+workspace. Use a separate server on each host.
+
+| Tool | Inputs and result |
+| --- | --- |
+| `relay_leaf` | `open` with a path returns the document viewport, host, and reader ID. `read`, `page_up`, `page_down` and `close` use that reader ID. |
+| `relay_leaf_capture` | With a reader ID, returns a PNG rendition of Leaf's terminal cells for the current viewport. |
+| `relay_leaf` reviews | `prepare_plan` and `prepare_diff` accept a path. Open the resulting ticket interactively using the workflow above. `review_result` accepts the ticket. |
+
+Reader windows belong to the MCP process and close at disconnect. Human review
+tickets persist separately. The PNG represents the terminal display; retain the
+original file for full-resolution figures. Run `test_mcp.py` with the script's
+dependencies and Leaf on PATH to exercise discovery, navigation, image capture,
+workspace checks, and review tickets over stdio.
