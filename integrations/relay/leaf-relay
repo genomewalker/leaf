@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Exchange a Leaf review with the requesting agent on the same host."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import uuid
+
+ROOT = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "leaf-relay"
+
+
+def prepare(kind, path):
+    source = path.resolve(strict=True)
+    ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ticket = str(uuid.uuid4())
+    folder = ROOT / ticket
+    folder.mkdir(mode=0o700)
+    snapshot = folder / ("input.md" if kind == "plan" else "input.patch")
+    try:
+        with source.open("rb") as reader, snapshot.open("xb") as writer:
+            shutil.copyfileobj(reader, writer)
+        digest = hashlib.sha256()
+        with snapshot.open("rb") as reader:
+            for chunk in iter(lambda: reader.read(65536), b""):
+                digest.update(chunk)
+        meta = dict(ticket=ticket, kind=kind, source=str(source), sha256=digest.hexdigest(),
+                    host=socket.gethostname(), pane=os.getenv("RELAY_PANE_ID"))
+        (folder / "request.json").write_text(json.dumps(meta))
+    except BaseException:
+        shutil.rmtree(folder)
+        raise
+    return meta
+
+
+def use_ticket(command, ticket):
+    folder = ROOT / str(uuid.UUID(ticket))
+    meta = json.loads((folder / "request.json").read_text())
+    if meta["host"] != socket.gethostname():
+        raise ValueError("Open this review on its originating host.")
+    result = folder / "result.json"
+    if command == "result":
+        outcome = json.loads(result.read_text()) if result.exists() else {"outcome": "pending"}
+        return dict(request=meta, review=outcome)
+    if result.exists():
+        raise ValueError("This review already has an outcome.")
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise ValueError("Open the review in an interactive terminal pane.")
+    # A kernel lock releases on exit, including after an interrupted reader.
+    import fcntl
+    with (folder / "reader.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if result.exists():
+            raise ValueError("This review already has an outcome.")
+        if meta["kind"] == "plan":
+            args = ["plan", "--title", meta["source"], str(folder / "input.md")]
+        else:
+            args = ["review", str(folder / "input.patch")]
+        subprocess.run(["leaf", *args, "--result", str(result)], check=True)
+    return use_ticket("result", ticket)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    new = commands.add_parser("prepare")
+    new.add_argument("kind", choices=["plan", "diff"])
+    new.add_argument("path", type=Path)
+    for name in ("open", "result"):
+        commands.add_parser(name).add_argument("ticket")
+    args = parser.parse_args()
+    try:
+        value = prepare(args.kind, args.path) if args.command == "prepare" else use_ticket(args.command, args.ticket)
+        print(json.dumps(value, ensure_ascii=False))
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        parser.exit(1, f"leaf-relay: {error}\n")
+
+
+if __name__ == "__main__":
+    main()
